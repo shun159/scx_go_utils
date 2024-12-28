@@ -44,6 +44,7 @@ type Cpu struct {
 	CoreID     int
 	LLCID      int
 	NodeID     int
+	SiblingID  int
 }
 
 // Core represents a CPU core and its CPUs.
@@ -106,7 +107,7 @@ func NewTopology() (*Topology, error) {
 	topoCtx := NewTopoCtx()
 	var nodes map[int]*Node
 
-	if _, err := os.Stat("/sys/devices/system/node"); err == nil {
+	if _, err := os.Stat("/sys/devices/system/node"); !os.IsNotExist(err) {
 		nodes, err = createNumaNodes(span, topoCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create NUMA nodes: %w", err)
@@ -118,7 +119,20 @@ func NewTopology() (*Topology, error) {
 		}
 	}
 
-	return newTopology(span, nodes)
+	topo, err := newTopology(span, nodes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize topology: %w", err)
+	}
+
+	// update sibling IDs
+	sibs := topo.SiblingCPUs()
+	for _, cpu := range topo.AllCPUs {
+		if cpu.ID < len(sibs) {
+			cpu.SiblingID = sibs[cpu.ID]
+		}
+	}
+
+	return topo, nil
 }
 
 // It constructs skip indices (AllCPUs, AllCores, AllLLCs) and ensures no duplicate entries exist.
