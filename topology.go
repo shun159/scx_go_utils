@@ -44,7 +44,7 @@ type Cpu struct {
 	CoreID     int
 	LLCID      int
 	NodeID     int
-	SiblingID  int
+	SiblingIDs []int
 }
 
 // Core represents a CPU core and its CPUs.
@@ -128,7 +128,8 @@ func NewTopology() (*Topology, error) {
 	sibs := topo.SiblingCPUs()
 	for _, cpu := range topo.AllCPUs {
 		if cpu.ID < len(sibs) {
-			cpu.SiblingID = sibs[cpu.ID]
+			// supports SMT2, SMT4, SMT8
+			cpu.SiblingIDs = sibs[cpu.ID]
 		}
 	}
 
@@ -195,26 +196,22 @@ func (t *Topology) HasLittleCores() bool {
 	return false
 }
 
-func (t *Topology) SiblingCPUs() []int {
-	siblingCPU := make([]int, NR_CPU_IDS)
-	for i := range siblingCPU {
-		siblingCPU[i] = -1
-	}
+func (t *Topology) SiblingCPUs() map[int][]int {
+	siblingMap := make(map[int][]int)
 
 	for _, core := range t.AllCores {
-		first := -1
-		for cpuID := range core.CPUs {
-			if first == -1 {
-				first = cpuID
-			} else {
-				siblingCPU[first] = cpuID
-				siblingCPU[cpuID] = first
-				break
-			}
+		siblingList := []int{}
+
+		for _, cpu := range core.CPUs {
+			siblingList = append(siblingList, cpu.ID)
+		}
+
+		for _, cpuID := range siblingList {
+			siblingMap[cpuID] = siblingList
 		}
 	}
 
-	return siblingCPU
+	return siblingMap
 }
 
 // newNode() initializes a new Node
