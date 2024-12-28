@@ -45,6 +45,7 @@ type Cpu struct {
 	LLCID      int
 	NodeID     int
 	SiblingIDs []int
+	IsPrimary  bool
 }
 
 // Core represents a CPU core and its CPUs.
@@ -212,6 +213,22 @@ func (t *Topology) SiblingCPUs() map[int][]int {
 	}
 
 	return siblingMap
+}
+
+// Check if the CPU is the primary thread based on thread_siblings_list
+func isPrimaryThread(cpuID int) (bool, error) {
+	siblingPath := getThreadSiblingsPath(cpuID)
+	data, err := os.ReadFile(siblingPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to read thread_siblings_list: %w", err)
+	}
+
+	siblings := strings.Split(strings.TrimSpace(string(data)), ",")
+	if siblings[0] == fmt.Sprintf("%d", cpuID) {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // newNode() initializes a new Node
@@ -570,6 +587,12 @@ func fetchCPUInfo(cpuID int, avgFreq *AvgFreq, topoCtx *TopoCtx) (*Cpu, error) {
 	// Determine core type
 	coreType := determineCoreType(avgFreq, baseFreq, maxFreq)
 
+	// Check if the cpu is a primary thread
+	isPrimary, err := isPrimaryThread(cpuID)
+	if err != nil {
+		isPrimary = false
+	}
+
 	// Build Cpu struct
 	return &Cpu{
 		ID:         cpuID,
@@ -582,6 +605,7 @@ func fetchCPUInfo(cpuID int, avgFreq *AvgFreq, topoCtx *TopoCtx) (*Cpu, error) {
 		CoreID:     coreID,
 		LLCID:      llcID,
 		CoreType:   coreType,
+		IsPrimary:  isPrimary,
 	}, nil
 }
 

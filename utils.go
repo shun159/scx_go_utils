@@ -64,3 +64,13 @@ func getCpuDirs() ([]string, error) {
 	}
 	return cpuDirs, nil
 }
+
+// getThreadSiblingsPath returns path to the thread_siblings_list
+func getThreadSiblingsPath(cpuID int) string {
+	return filepath.Join(
+		getSysDeviceCpuPath(),
+		fmt.Sprintf("cpu%d", cpuID),
+		"topology",
+		"thread_siblings_list",
+	)
+}
