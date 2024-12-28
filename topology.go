@@ -673,23 +673,3 @@ func parseNodeID(dir os.DirEntry) (int, error) {
 	}
 	return nodeID, nil
 }
-
-// getNumaNodeDirs retrieves all valid NUMA node directories.
-func getNumaNodeDirs() ([]os.DirEntry, error) {
-	numaPath := filepath.Join(getSysDeviceCpuPath(), "../node")
-	numaDirs, err := os.ReadDir(numaPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read NUMA node directory: %w", err)
-	}
-	return numaDirs, nil
-}
-
-// getCpuDirs retrieves all valid CPU directories from the system.
-func getCpuDirs() ([]string, error) {
-	cpuPathPattern := filepath.Join(getSysDeviceCpuPath(), "cpu[0-9]*")
-	cpuDirs, err := filepath.Glob(cpuPathPattern)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list CPUs: %w", err)
-	}
-	return cpuDirs, nil
-}
