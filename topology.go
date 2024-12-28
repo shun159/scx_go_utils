@@ -203,6 +203,17 @@ func (t *Topology) SiblingCPUs() []int {
 	return siblingCPU
 }
 
+// newNode() initializes a new Node
+func newNode(nodeID int) *Node {
+	return &Node{
+		ID:       nodeID,
+		LLCs:     make(map[int]*Llc),
+		AllCores: make(map[int]*Core),
+		AllCPUs:  make(map[int]*Cpu),
+		Span:     NewCpumask(),
+	}
+}
+
 // NewTopoCtx initializes a new TopoCtx.
 func NewTopoCtx() *TopoCtx {
 	return &TopoCtx{
@@ -238,106 +249,59 @@ func GetCpuOnlineMask() (*Cpumask, error) {
 	return mask, nil
 }
 
+// It processes all available CPUs and adds them to a single Node (ID: 0).
 func createDefaultNode(onlineMask *Cpumask, topoCtx *TopoCtx, flattenLLC bool) (map[int]*Node, error) {
-	nodes := make(map[int]*Node)
+	node := newNode(0)
 
-	node := &Node{
-		ID:       0,
-		LLCs:     make(map[int]*Llc),
-		AllCores: make(map[int]*Core),
-		AllCPUs:  make(map[int]*Cpu),
-		Span:     NewCpumask(),
+	cpuDirs, err := getCpuDirs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list CPU directories: %w", err)
 	}
 
-	cpuPathPattern := filepath.Join(getSysDeviceCpuPath(), "cpu[0-9]*")
-	cpuDirs, err := filepath.Glob(cpuPathPattern)
+	avgFreq, err := avgCpuFreq()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list CPUs: %w", err)
-	}
-
-	avgBaseFreq, err := avgCpuFreq()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CPU frequency: %w", err)
+		return nil, fmt.Errorf("failed to get average CPU frequency: %w", err)
 	}
 
 	for _, cpuDir := range cpuDirs {
-		cpuName := filepath.Base(cpuDir)
-		if !isValidCpuDir(cpuName) {
-			continue
-		}
-
-		cpuID, err := extractCpuID(cpuName)
+		cpuID, err := extractCpuIDFromDir(cpuDir)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse CPU ID from %s: %w", cpuName, err)
+			return nil, fmt.Errorf("failed to parse CPU ID from %s: %w", cpuDir, err)
 		}
 
-		err = createInsertCPU(cpuID, node, onlineMask, topoCtx, avgBaseFreq, flattenLLC)
+		err = createInsertCPU(cpuID, node, onlineMask, topoCtx, avgFreq, flattenLLC)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert CPU %d: %w", cpuID, err)
 		}
 	}
 
-	nodes[0] = node
+	nodes := map[int]*Node{
+		0: node,
+	}
+
 	return nodes, nil
 }
 
+// createNumaNodes builds a topology map for each NUMA node.
 func createNumaNodes(onlineMask *Cpumask, topoCtx *TopoCtx) (map[int]*Node, error) {
 	nodes := make(map[int]*Node)
 
-	numaPath := filepath.Join(getSysDeviceCpuPath(), "../node")
-	numaDirs, err := os.ReadDir(numaPath)
+	numaDirs, err := getNumaNodeDirs()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read NUMA node directory: %w", err)
+		return nil, fmt.Errorf("failed to get NUMA node directories: %w", err)
 	}
 
 	for _, dir := range numaDirs {
-		if !dir.IsDir() || !strings.HasPrefix(dir.Name(), "node") {
-			continue
-		}
-
-		nodeIDStr := strings.TrimPrefix(dir.Name(), "node")
-		nodeID, err := strconv.Atoi(nodeIDStr)
+		nodeID, err := parseNodeID(dir)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse NUMA node ID from %s: %w", dir.Name(), err)
+			return nil, fmt.Errorf("failed to parse NUMA node ID: %w", err)
 		}
 
-		nodePath := filepath.Join(numaPath, dir.Name())
-		node := &Node{
-			ID:       nodeID,
-			LLCs:     make(map[int]*Llc),
-			AllCores: make(map[int]*Core),
-			AllCPUs:  make(map[int]*Cpu),
-			Span:     NewCpumask(),
-		}
-
-		cpuPattern := filepath.Join(nodePath, "cpu[0-9]*")
-		cpuDirs, err := filepath.Glob(cpuPattern)
+		node := newNode(nodeID)
+		err = processNodeCPUs(node, onlineMask, topoCtx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read CPUs in node %d: %w", nodeID, err)
+			return nil, fmt.Errorf("failed to process CPUs for node %d: %w", nodeID, err)
 		}
-
-		avgBaseFreq, err := avgCpuFreq()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CPU frequency: %w", err)
-		}
-
-		for _, cpuDir := range cpuDirs {
-			cpuName := filepath.Base(cpuDir)
-			if !strings.HasPrefix(cpuName, "cpu") {
-				continue
-			}
-
-			cpuID, err := strconv.Atoi(strings.TrimPrefix(cpuName, "cpu"))
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse CPU ID from %s: %w", cpuName, err)
-			}
-
-			err = createInsertCPU(cpuID, node, onlineMask, topoCtx, avgBaseFreq, false)
-			if err != nil {
-				return nil, fmt.Errorf("failed to insert CPU %d in node %d: %w", cpuID, nodeID, err)
-			}
-		}
-
 		nodes[nodeID] = node
 	}
 
@@ -376,6 +340,35 @@ func createInsertCPU(
 
 	return nil
 }
+
+func getCacheID(topoCtx *TopoCtx, cacheLevelPath string, cacheLevel int) (int, error) {
+	idMap, err := selectCacheIDMap(topoCtx, cacheLevel)
+	if err != nil {
+		return -1, err
+	}
+
+	// Get the shared CPU list as the cache key
+	key, err := readSharedCPUList(cacheLevelPath)
+	if err != nil {
+		return -1, err
+	}
+
+	// Check if the ID already exists in the cache
+	if id, exists := idMap[key]; exists {
+		return id, nil
+	}
+
+	// read Id from cache ID file
+	if id, err := readCacheIDFromFile(cacheLevelPath); err == nil {
+		idMap[key] = id
+		return id, nil
+	}
+
+	newID := len(idMap)
+	idMap[key] = newID
+	return newID, nil
+}
+
 func avgCpuFreq() (*AvgFreq, error) {
 	baseFreqSum := 0
 	maxScalingFreq := 0
@@ -426,52 +419,41 @@ func avgCpuFreq() (*AvgFreq, error) {
 	return &AvgFreq{baseFreqSum / cpuCount, maxScalingFreq}, nil
 }
 
-func getCacheID(topoCtx *TopoCtx, cacheLevelPath string, cacheLevel int) (int, error) {
-	var idMap map[string]int
-
-	// Determine the correct ID map based on cache level
+// selectCacheIDMap selects the appropriate cache ID map based on the cache level.
+func selectCacheIDMap(topoCtx *TopoCtx, cacheLevel int) (map[string]int, error) {
 	switch cacheLevel {
 	case 2:
-		idMap = topoCtx.L2IDs
+		return topoCtx.L2IDs, nil
 	case 3:
-		idMap = topoCtx.L3IDs
+		return topoCtx.L3IDs, nil
 	default:
-		return -1, fmt.Errorf("unsupported cache level: %d", cacheLevel)
+		return nil, fmt.Errorf("unsupported cache level: %d", cacheLevel)
 	}
+}
 
-	// Read the shared_cpu_list file
+// readSharedCPUList reads and trims the shared_cpu_list file to generate a cache key.
+func readSharedCPUList(cacheLevelPath string) (string, error) {
 	sharedCpuListPath := filepath.Join(cacheLevelPath, "shared_cpu_list")
 	data, err := os.ReadFile(sharedCpuListPath)
 	if err != nil {
-		return -1, fmt.Errorf("failed to read shared_cpu_list: %w", err)
+		return "", fmt.Errorf("failed to read shared_cpu_list: %w", err)
 	}
+	return strings.TrimSpace(string(data)), nil
+}
 
-	// Clean and use the shared CPU list as the key
-	key := strings.TrimSpace(string(data))
-
-	// Check if the ID already exists in the cache
-	if id, exists := idMap[key]; exists {
-		return id, nil
-	}
-
-	// Attempt to read the cache ID from the "id" file
+// readCacheIDFromFile attempts to read the cache ID from the "id" file.
+func readCacheIDFromFile(cacheLevelPath string) (int, error) {
 	idFilePath := filepath.Join(cacheLevelPath, "id")
-	idData, err := os.ReadFile(idFilePath)
-	if err == nil {
-		// Parse the ID as an integer
-		var id int
-		_, err := fmt.Sscanf(strings.TrimSpace(string(idData)), "%d", &id)
-		if err == nil {
-			// Store the retrieved ID in the map
-			idMap[key] = id
-			return id, nil
-		}
+	data, err := os.ReadFile(idFilePath)
+	if err != nil {
+		return -1, fmt.Errorf("failed to read id file: %w", err)
 	}
 
-	// If no ID exists, assign a new unique ID
-	newID := len(idMap)
-	idMap[key] = newID
-	return newID, nil
+	id, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return -1, fmt.Errorf("failed to parse id from file: %w", err)
+	}
+	return id, nil
 }
 
 // isValidCpuDir validates whether a directory corresponds to a CPU.
@@ -596,4 +578,80 @@ func fetchCPUInfo(cpuID int, avgFreq *AvgFreq, topoCtx *TopoCtx) (*Cpu, error) {
 		LLCID:      llcID,
 		CoreType:   coreType,
 	}, nil
+}
+
+func extractCpuIDFromDir(cpuDir string) (int, error) {
+	cpuName := filepath.Base(cpuDir)
+	if !strings.HasPrefix(cpuName, "cpu") {
+		return -1, fmt.Errorf("invalid CPU directory: %s", cpuName)
+	}
+
+	cpuID, err := strconv.Atoi(strings.TrimPrefix(cpuName, "cpu"))
+	if err != nil {
+		return -1, fmt.Errorf("failed to parse CPU ID from %s: %w", cpuName, err)
+	}
+
+	return cpuID, nil
+}
+
+// processNodeCPUs processes all CPUs in a given NUMA node.
+func processNodeCPUs(node *Node, onlineMask *Cpumask, topoCtx *TopoCtx) error {
+	nodePath := filepath.Join(getSysDeviceCpuPath(), fmt.Sprintf("../node/node%d", node.ID))
+	cpuPattern := filepath.Join(nodePath, "cpu[0-9]*")
+	cpuDirs, err := filepath.Glob(cpuPattern)
+	if err != nil {
+		return fmt.Errorf("failed to list CPUs in node %d: %w", node.ID, err)
+	}
+
+	avgFreq, err := avgCpuFreq()
+	if err != nil {
+		return fmt.Errorf("failed to retrieve average CPU frequency: %w", err)
+	}
+
+	for _, cpuDir := range cpuDirs {
+		cpuID, err := extractCpuIDFromDir(cpuDir)
+		if err != nil {
+			return fmt.Errorf("failed to extract CPU ID from %s: %w", cpuDir, err)
+		}
+
+		err = createInsertCPU(cpuID, node, onlineMask, topoCtx, avgFreq, false)
+		if err != nil {
+			return fmt.Errorf("failed to insert CPU %d into node %d: %w", cpuID, node.ID, err)
+		}
+	}
+	return nil
+}
+
+// parseNodeID extracts the node ID from a directory name.
+func parseNodeID(dir os.DirEntry) (int, error) {
+	if !dir.IsDir() || !strings.HasPrefix(dir.Name(), "node") {
+		return -1, fmt.Errorf("invalid NUMA node directory: %s", dir.Name())
+	}
+
+	nodeIDStr := strings.TrimPrefix(dir.Name(), "node")
+	nodeID, err := strconv.Atoi(nodeIDStr)
+	if err != nil {
+		return -1, fmt.Errorf("failed to parse NUMA node ID from %s: %w", dir.Name(), err)
+	}
+	return nodeID, nil
+}
+
+// getNumaNodeDirs retrieves all valid NUMA node directories.
+func getNumaNodeDirs() ([]os.DirEntry, error) {
+	numaPath := filepath.Join(getSysDeviceCpuPath(), "../node")
+	numaDirs, err := os.ReadDir(numaPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read NUMA node directory: %w", err)
+	}
+	return numaDirs, nil
+}
+
+// getCpuDirectories retrieves all valid CPU directories from the system.
+func getCpuDirs() ([]string, error) {
+	cpuPathPattern := filepath.Join(getSysDeviceCpuPath(), "cpu[0-9]*")
+	cpuDirs, err := filepath.Glob(cpuPathPattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list CPUs: %w", err)
+	}
+	return cpuDirs, nil
 }
