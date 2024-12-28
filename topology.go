@@ -293,7 +293,9 @@ func createNumaNodes(onlineMask *Cpumask, topoCtx *TopoCtx) (map[int]*Node, erro
 
 	for _, dir := range numaDirs {
 		nodeID, err := parseNodeID(dir)
-		if err != nil {
+		if nodeID == -1 && err == nil {
+			continue
+		} else if err != nil {
 			return nil, fmt.Errorf("failed to parse NUMA node ID: %w", err)
 		}
 
@@ -663,7 +665,7 @@ func processNodeCPUs(node *Node, onlineMask *Cpumask, topoCtx *TopoCtx) error {
 // parseNodeID extracts the node ID from a directory name.
 func parseNodeID(dir os.DirEntry) (int, error) {
 	if !dir.IsDir() || !strings.HasPrefix(dir.Name(), "node") {
-		return -1, fmt.Errorf("invalid NUMA node directory: %s", dir.Name())
+		return -1, nil // skip
 	}
 
 	nodeIDStr := strings.TrimPrefix(dir.Name(), "node")

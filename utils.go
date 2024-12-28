@@ -51,6 +51,7 @@ func getNumaNodeDirs() ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read NUMA node directory: %w", err)
 	}
+
 	return numaDirs, nil
 }
 
