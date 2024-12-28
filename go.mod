@@ -1,4 +1,4 @@
-module scx_go_utils
+module github.com/shun159/scx_go_utils
 
 go 1.23.4
 

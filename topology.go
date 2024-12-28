@@ -538,34 +538,26 @@ func determineCoreType(avgFreq *AvgFreq, baseFreq, maxFreq int) CoreType {
 	return LittleCore
 }
 
+// fetchCPUInfo fetches all relevant information for a given CPU.
 func fetchCPUInfo(cpuID int, avgFreq *AvgFreq, topoCtx *TopoCtx) (*Cpu, error) {
 	cpuPath := filepath.Join(getSysDeviceCpuPath(), fmt.Sprintf("cpu%d", cpuID))
-	topologyPath := filepath.Join(cpuPath, "topology")
-	cachePath := filepath.Join(cpuPath, "cache")
-	freqPath := filepath.Join(cpuPath, "cpufreq")
 
-	coreID, err := readFileAsInt(filepath.Join(topologyPath, "core_id"))
+	// Fetch topology information
+	coreID, llcID, l2ID, l3ID, err := fetchCPUTopologyInfo(cpuPath, topoCtx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read core_id: %w", err)
+		return nil, fmt.Errorf("failed to fetch topology info for CPU %d: %w", cpuID, err)
 	}
 
-	l2ID, _ := getCacheID(topoCtx, filepath.Join(cachePath, "index2"), 2)
-	l3ID, _ := getCacheID(topoCtx, filepath.Join(cachePath, "index3"), 3)
-	llcID := l3ID
-	if l3ID == -1 {
-		llcID = l2ID
+	// Fetch frequency information
+	minFreq, maxFreq, baseFreq, transLatNs, err := fetchCPUFrequencyInfo(cpuPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch frequency info for CPU %d: %w", cpuID, err)
 	}
 
-	minFreq, _ := readFileAsInt(filepath.Join(freqPath, "scaling_min_freq"))
-	maxFreq, _ := readFileAsInt(filepath.Join(freqPath, "scaling_max_freq"))
-	baseFreq, _ := readFileAsInt(filepath.Join(freqPath, "base_frequency"))
-	transLatNs, _ := readFileAsInt(filepath.Join(freqPath, "cpuinfo_transition_latency"))
-	if baseFreq == 0 {
-		baseFreq = maxFreq
-	}
-
+	// Determine core type
 	coreType := determineCoreType(avgFreq, baseFreq, maxFreq)
 
+	// Build Cpu struct
 	return &Cpu{
 		ID:         cpuID,
 		MinFreq:    minFreq,
@@ -578,6 +570,52 @@ func fetchCPUInfo(cpuID int, avgFreq *AvgFreq, topoCtx *TopoCtx) (*Cpu, error) {
 		LLCID:      llcID,
 		CoreType:   coreType,
 	}, nil
+}
+
+// fetchCPUTopologyInfo retrieves topology-related information of a CPU.
+func fetchCPUTopologyInfo(cpuPath string, topoCtx *TopoCtx) (coreID, llcID, l2ID, l3ID int, err error) {
+	topologyPath := filepath.Join(cpuPath, "topology")
+	cachePath := filepath.Join(cpuPath, "cache")
+
+	// Read core_id
+	coreID, err = readFileAsInt(filepath.Join(topologyPath, "core_id"))
+	if err != nil {
+		return -1, -1, -1, -1, fmt.Errorf("failed to read core_id: %w", err)
+	}
+
+	// Read cache IDs
+	l2ID, _ = getCacheID(topoCtx, filepath.Join(cachePath, "index2"), 2)
+	l3ID, _ = getCacheID(topoCtx, filepath.Join(cachePath, "index3"), 3)
+
+	// Determine LLC ID
+	llcID = l3ID
+	if l3ID == -1 {
+		llcID = l2ID
+	}
+
+	return coreID, llcID, l2ID, l3ID, nil
+}
+
+// fetchCPUFrequencyInfo retrieves frequency-related information of a CPU.
+func fetchCPUFrequencyInfo(cpuPath string) (minFreq, maxFreq, baseFreq, transLatNs int, err error) {
+	freqPath := filepath.Join(cpuPath, "cpufreq")
+
+	// Read min_freq
+	minFreq, _ = readFileAsInt(filepath.Join(freqPath, "scaling_min_freq"))
+
+	// Read max_freq
+	maxFreq, _ = readFileAsInt(filepath.Join(freqPath, "scaling_max_freq"))
+
+	// Read base_freq
+	baseFreq, _ = readFileAsInt(filepath.Join(freqPath, "base_frequency"))
+	if baseFreq == 0 {
+		baseFreq = maxFreq
+	}
+
+	// Read transition_latency
+	transLatNs, _ = readFileAsInt(filepath.Join(freqPath, "cpuinfo_transition_latency"))
+
+	return minFreq, maxFreq, baseFreq, transLatNs, nil
 }
 
 func extractCpuIDFromDir(cpuDir string) (int, error) {
@@ -646,7 +684,7 @@ func getNumaNodeDirs() ([]os.DirEntry, error) {
 	return numaDirs, nil
 }
 
-// getCpuDirectories retrieves all valid CPU directories from the system.
+// getCpuDirs retrieves all valid CPU directories from the system.
 func getCpuDirs() ([]string, error) {
 	cpuPathPattern := filepath.Join(getSysDeviceCpuPath(), "cpu[0-9]*")
 	cpuDirs, err := filepath.Glob(cpuPathPattern)
